@@ -1,79 +1,68 @@
 import numpy as np
 import tensorflow as tf
 from tensorflow import keras
+import tensorflow_datasets as tfds
+from keras import layers
+from keras.layers import TextVectorization
 import string
 import re
 
-
-
 batch_size = 32
 max_features = 20000
-max_length = 500
+max_length = 150
 embedding_dim = 128
 
-x_train = tf.keras.utils.text_dataset_from_directory(
-    'aclImdb/train',
-    validation_split=0.2,
-    subset='training',
-    seed=1337,
+train_data, validation_data, test_data = tfds.load(
+    name="imdb_reviews",
     batch_size=batch_size,
-)
-x_val = tf.keras.utils.text_dataset_from_directory(
-    'aclImdb/train',
-    validation_split=0.2,
-    subset='validation',
-    seed=1337,
-    batch_size=batch_size,
-)
-x_test = tf.keras.utils.text_dataset_from_directory(
-    'aclImdb/test',
-    batch_size=batch_size,
-)
+    shuffle_files=True,
+    split=('train[:80%]', 'train[20%:]', 'test'),
+    as_supervised=True)
 
 
-def custom_standardize(input_data):
-    lowercase=tf.strings.lower(input_data)
-    strip = tf.strings.regex_replace(lowercase, '<br />', '')
-    return tf.strings.regex_replace(strip, f'[{re.escape(string.punctuation)}]', '')
 
+def custom_standardization(input_data):
+    lowercase = tf.strings.lower(input_data)
+    stripped_html = tf.strings.regex_replace(lowercase, "<br />", " ")
+    return tf.strings.regex_replace(
+        stripped_html, f"[{re.escape(string.punctuation)}]", ""
+    )
 
-vectorize = tf.keras.layers.TextVectorization(
-    standardize = custom_standardize,
-    output_mode='int',
+vectorize_layer = TextVectorization(
+    standardize=custom_standardization,
     max_tokens=max_features,
-    output_sequence_length=max_length,
+    output_mode='int',
+    output_sequence_length=max_length
 )
+
+
+text_ds = train_data.map(lambda x, y: x)
+vectorize_layer.adapt(text_ds)
 
 
 def vectorize_text(text, label):
-    text = tf.expand_dims(text, -1)
-    return vectorize(text), label
+    return vectorize_layer(text), label
 
 
-text_ds = x_train.map(lambda x, labels: x)
-vectorize.adapt(text_ds)
-
-
-train_ds = x_train.map(vectorize_text)
-val_ds = x_val.map(vectorize_text)
-test_ds = x_test.map(vectorize_text)
+train_ds = train_data.map(vectorize_text)
+validation_ds = validation_data.map(vectorize_text)
+test_ds = test_data.map(vectorize_text)
 
 AUTOTUNE = tf.data.AUTOTUNE
-
 train_ds = train_ds.cache().prefetch(buffer_size=AUTOTUNE)
-val_ds = val_ds.cache().prefetch(buffer_size=AUTOTUNE)
-test_ds = test_ds.cache().prefetch(buffer_size=AUTOTUNE)
+validation_ds = validation_ds.cache().prefetch(buffer_size=AUTOTUNE)
+test_ds = validation_ds.cache().prefetch(buffer_size=AUTOTUNE)
 
-model = keras.Sequential([
-    keras.layers.Embedding(max_features, embedding_dim),
-    keras.layers.Dropout(0.5),
-    keras.layers.Conv1D(embedding_dim,3,activation='relu'),
-    keras.layers.GlobalMaxPooling1D(),
-    keras.layers.Dense(128, activation='relu'),
-    keras.layers.Dropout(0.5),
-    keras.layers.Dense(1, activation="relu"),
-])
 
-model.compile(loss="binary_crossentropy", optimizer="adam", metrics=["accuracy"])
-model.fit(train_ds,validation_data=val_ds,epochs=3)
+inputs = tf.keras.Input(shape=(None,), dtype="int64")
+x = layers.Embedding(max_features, embedding_dim)(inputs)
+x = layers.Conv1D(128, 15, padding='valid', activation='relu', strides=3)(x)
+x = layers.GlobalMaxPooling1D()(x)
+x = layers.Dense(128, activation='relu')(x)
+predictions = layers.Dense(1, activation='relu')(x)
+
+model = keras.Model(inputs, predictions)
+
+model.compile(loss='binary_crossentropy', optimizer='adam', metrics=['accuracy'])
+model.fit(train_ds, validation_data=validation_ds, epochs=5)
 model.evaluate(test_ds)
